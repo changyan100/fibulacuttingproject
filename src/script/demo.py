@@ -14,7 +14,8 @@ from geometry_msgs.msg import WrenchStamped
 import rtde_control
 import rtde_receive
 
-
+from std_msgs.msg import Bool
+from scipy.spatial.transform import Rotation as R
 
 
 
@@ -23,10 +24,12 @@ class ImpendancControl():
 	def __init__(self):
 		# super(ClassName, self).__init__()
 		# self.arg = arg
+		self.rebiasflag = True
+		self.bias = [0,0,0,0,0,0]
 
 		self.rtde_c = rtde_control.RTDEControlInterface("192.168.1.2")
 		self.sub_atiforce = rospy.Subscriber("netft_data", WrenchStamped, self.callback_robotmove)
-	
+
 
 
 
@@ -36,15 +39,22 @@ class ImpendancControl():
 		# print("ati torque: ", data.wrench.torque)
 		force = data.wrench.force
 		torque = data.wrench.torque
-		self.atiforce = [force.x+2.1, force.y+1.3, force.z+23.8, torque.x-0.24, torque.y, torque.z]
-		print("force:", self.atiforce)
+		print("force:", force)
+		print("torque:", torque)
+		if self.rebiasflag == True:
+			self.bias = [force.x, force.y, force.z, torque.x, torque.y, torque.z]
+			self.rebiasflag = False
+		atiforce = [force.x-self.bias[0], force.y-self.bias[1], force.z-self.bias[2], torque.x-self.bias[3], torque.y-self.bias[4], torque.z-self.bias[5]]
+		# print("force:", atiforce)
 
 		scale = [0.001, 0.001,0.001, 0.001,0.001, 0.001]
 		vel = [0,0,0,0,0,0]
 		for x in range(0,6):
-			vel[x] = scale[x]*self.atiforce [x]
+			vel[x] = scale[x]*atiforce [x]
 
 		self.rtde_c.speedL( vel,0.2)
+
+		
 
 
 
