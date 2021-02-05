@@ -18,6 +18,13 @@ from std_msgs.msg import Bool
 from scipy.spatial.transform import Rotation as R
 from scipy.signal import butter, lfilter, freqz
 
+import os
+import matplotlib.pyplot as plt   # MATLAB plotting functions
+from control.matlab import *  # MATLAB-like functions
+import numpy as np
+import control
+
+
 np.set_printoptions(suppress=True)
 
 class ImpendancControl():
@@ -25,81 +32,119 @@ class ImpendancControl():
 	def __init__(self):
 		# super(ClassName, self).__init__()
 		# self.arg = arg
-
+		self.since = time.time()
+		self.lasty = np.zeros([6])
 		self.rebias = [0,0,0,0,0,0] #np.zeros([6]) 
+		self.length = 10000
+		self.Tlist = np.zeros([self.length])
+		self.Ulist = np.zeros([6,self.length])
+
 		# self.rebiasstatus = False
-		self.atiforce = [0,0,0,0,0,0] #np.zeros([6])
-		self.robotmoveflag = False
-		self.startflag = True
-		self.robotstop = True
-		self.inittime = time.time()
+		# self.atiforce = [0,0,0,0,0,0] #np.zeros([6])
+		# self.robotmoveflag = False
+		# self.startflag = True
+		# self.robotstop = True
+		# self.inittime = time.time()
 
 		print("Init start!")
 		self.rtde_c = rtde_control.RTDEControlInterface("192.168.1.2")
 		self.rtde_r = rtde_receive.RTDEReceiveInterface("192.168.1.2")
 		print("RTDE start!")
-		self.sub_atirebias = rospy.Subscriber("atirebias_status", Bool, self.callback_atirebias)
-		print("ATI rebias start!")
-		self.sub_robotstatus = rospy.Subscriber("robotmove_status", Bool, self.callback_robotstatus)
+
+		# self.sub_robotstatus = rospy.Subscriber("robotmove_status", Bool, self.callback_robotstatus)
 		print("Robot move flag start!")
-		self.sub_atiforce = rospy.Subscriber("netft_data", WrenchStamped, self.callback_robotmove)
-		print("ATI sensor start!")
 
-	def butter_lowpass(self, cutoff=100, fs=1000, order=3):
-		nyq = 0.5 * fs
-		normal_cutoff = cutoff / nyq
-		b, a = butter(order, normal_cutoff, btype='low', analog=False)
-		return b, a
-
-	def butter_lowpass_filter(self, data, cutoff=100, fs=1000, order=3):
-		b, a = self.butter_lowpass(cutoff, fs, order=order)
-		y = lfilter(b, a, data)
-		return y
-
-	def callback_robotmove(self, data):
-
-		# print("ati force: ", data.wrench.force)
-		# print("ati torque: ", data.wrench.torque)
-		force = data.wrench.force
-		torque = data.wrench.torque
-		# print("raw force: ", force)
-		# print("raw torque: ", torque)
-		self.raw_atiforce = [-force.x, -force.y, force.z, -torque.x, -torque.y, torque.z]
-		# print("reading force: ", self.atiforce)
+	def transferfunction(self, m,k,c,data):
 		
-		self.atiforce = self.butter_lowpass_filter(self.raw_atiforce)
+		# System matrices
+		A = [[0, 1.], [-k/m, -c/m]]
+		B = [[0], [1/m]]
+		C = [[1., 0]]
+		sys = ss(A, B, C, 0)
 
-		# print("Lowpass force: ", self.atiforce)
 
-		if self.startflag == True:
-			print("---------------------------------rebiased!!!")
-			self.rebias = self.atiforce
-			self.startflag = False
-			
-		# print("rebias value: ", self.rebias)
+		# T1 = np.arange(0, 100, 0.001)
+		# T2 = T1.flatten()
+		# U = 100*np.sin(T2)
 
-		# force_rebiased = self.atiforce- self.rebias
-		force_rebiased = [0,0,0,0,0,0]
-		a = ['Fx', 'Fy', 'Fz', 'Tx', 'Ty', 'Tz']
-		# print("rebiased forces:")
-		for x in range(0,6):
-			force_rebiased[x] = self.atiforce[x] - self.rebias[x]
-			# print(a[x], "%.3f" % force_rebiased[x])
-		# print("rebiased force: ",  "%.3f" % force_rebiased[0],  "%.3f" % force_rebiased[1],"%.3f" % force_rebiased[2],"%.3f" % force_rebiased[3],"%.3f" % force_rebiased[4],"%.3f" % force_rebiased[5])
-		# tuning admittance scale here
+		tt = np.zeros([2])
+		tt[0] = self.since
+		tt[1] = time.time()
+		T = tt.flatten()
+		T1, yout, xout = control.forced_response(sys, T, U=data, X0=0.0, transpose=False, interpolate=False, squeeze=True)
+		out = yout.T
+		return out[-1]
+
+
+	def discretetransfer(self, m, c, Tin, Uin):
+
+		Ts = time.time()-self.since
+		self.since = time.time
+		print("run time: ", time.time())
+		sys = control.TransferFunction(1,[m,c])
+		sysd = sys.sample(Ts)
+		yout, T, xout = lsim(sysd,Uin,Tin, X0=0.0)
+		print("ycout", yout)
+		return yout[-1]
+
+	def inverseLaplas(ut, t, delta, omega_n, omage_d):
+		pass
+
+	def robotmove(self, count):
+		force = self.rtde_r.getActualTCPForce()
+		print("force: ", force)
+		M = [100,100,100,100,100,100]
+		K = [0,0,0,0,0,0]
+		C = [200,200,200,200,200,200]
+		y = np.zeros([6])
+
+		if count<self.length:
+			self.Tlist[count] = time.time()
+			for i in range(0,6):
+				self.Ulist[i,count] = force[i]
+		else:
+			tempT = self.Tlist
+			self.Tlist[0:-1] = tempT[1:]
+			self.Tlist[-1] = time.time()
+			for i in range(0,6):
+				tempU = self.Ulist[i,:]
+				self.Ulist[i,0:-1] = tempU[1:]
+				self.Ulist[i,-1] = force[i]
+
+		for i in range(0,6):
+			Tin = self.Tlist
+			Uin = self.Ulist[i,:]
+			y[i] =self.discretetransfer(M[i],C[i],Tin, Uin)
 		
-		scale = [0.0005, 0.0005,0.0005, 0.01, 0.01, 0.01]
-		
+		# scale = [0.0005, 0.0005,0.0005, 0.01, 0.01, 0.01]
+		# print("lasty ", self.lasty)
+		# print("y ", y)
+		# current = time.time()
 
-		vel = np.zeros([6]) #[0,0,0,0,0,0]
-		for x in range(0,3):
-			if abs(force_rebiased[x]) > 15: #set a active threshold for force xyz
-				vel[x] = scale[x]*force_rebiased[x]
-		for x in range(3,6):
-			if abs(force_rebiased[x]) > 0.2: #set a active threshold for torque xyz
-				vel[x] = scale[x]*force_rebiased[x]
+		# delt = current - self.since
+		# dely = y - self.lasty
+		# print("delt ", delt)
+		# vel = np.divide(dely, delt)
+		vel = y
+
+		print("------------vel calculated: ", vel)
+
+		# self.since = current
+		# self.lasty = y
+
+		# vel = np.zeros([6]) #[0,0,0,0,0,0]
+
+
+
+		# for x in range(0,3):
+		# 	if abs(force_rebiased[x]) > 15: #set a active threshold for force xyz
+		# 		vel[x] = scale[x]*force_rebiased[x]
+		# for x in range(3,6):
+		# 	if abs(force_rebiased[x]) > 0.2: #set a active threshold for torque xyz
+		# 		vel[x] = scale[x]*force_rebiased[x]
 		# print("calculated velocity: ", vel)
 		# FwdKin = self.rtde_c.getForwardKinematics()
+		
 		FwdKin = self.rtde_r.getTargetTCPPose()
 		# print("fwdkin", FwdKin)
 		pose = np.zeros([3])
@@ -113,7 +158,11 @@ class ImpendancControl():
 		trans[1] =  FwdKin[1]
 		trans[2] =  FwdKin[2]
 
-		outVel = self.VelAdjointTrans(Rotmatrix, trans, vel)
+		outVel_raw = self.VelAdjointTrans(Rotmatrix, trans, vel)
+
+		outVel = outVel_raw
+		# print("robot velocity: ", outVel)
+		self.rtde_c.speedL( outVel,0.2)
 
 		# print("inrot = ", Rotmatrix)
 		# print("intrans = ", trans)
@@ -126,20 +175,18 @@ class ImpendancControl():
 		# 	zerovel = [0,0,0,0,0,0]
 		# 	self.rtde_c.speedL(zerovel,0.5)
 		
-		if self.robotmoveflag == True:
-			print("robot vel:", outVel)
-			outVel[3] = 0
-			outVel[4] = 0
-			outVel[5] = 0
-			self.rtde_c.speedL( outVel,0.2)
-			self.robotstop = False
-		elif self.robotstop == False:
-			zerovel = [0,0,0,0,0,0]
-			self.rtde_c.speedL(zerovel,0.5)
-			self.robotstop = True
-			print("robot stopoed!!!")
-		else:
-			pass
+		# if self.robotmoveflag == True:
+		# 	print("robot vel:", outVel)
+
+		# 	self.rtde_c.speedL( outVel,0.2)
+		# 	self.robotstop = False
+		# elif self.robotstop == False:
+		# 	zerovel = [0,0,0,0,0,0]
+		# 	self.rtde_c.speedL(zerovel,0.5)
+		# 	self.robotstop = True
+		# 	print("robot stopoed!!!")
+		# else:
+		# 	pass
 
 
 	def VelAdjointTrans(self, inRot, inTrans, inVel):
@@ -189,24 +236,28 @@ class ImpendancControl():
 
 
 
-	def callback_atirebias(self, data):
-		print("----------------------------Sensor rebiased!!")
-		self.rebias = self.atiforce
+	# def callback_atirebias(self, data):
+	# 	print("----------------------------Sensor rebiased!!")
+	# 	self.rebias = self.atiforce
 
-	def callback_robotstatus(self, data):
-		print("robotmoveflag is ", data.data)
-		self.robotmoveflag = data.data
+	# def callback_robotstatus(self, data):
+	# 	print("robotmoveflag is ", data.data)
+	# 	self.robotmoveflag = data.data
 
 
 def main(args):
 	rc = ImpendancControl()
 	print("main started!")
-	rospy.init_node('ImpendancControl', anonymous=True)
-	try:
-		rospy.spin()
-	except KeyboardInterrupt:
-		print("Program is aborted by the user!")
-		rospy.signal_shutdown("Program aborted!")
+	count = 0
+	while True:
+		rc.robotmove(count)
+		count = count+1
+	# rospy.init_node('ImpendancControl', anonymous=True)
+	# try:
+	# 	rospy.spin()
+	# except KeyboardInterrupt:
+	# 	print("Program is aborted by the user!")
+	# 	rospy.signal_shutdown("Program aborted!")
 	
 
 
